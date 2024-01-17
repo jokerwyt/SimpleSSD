@@ -72,6 +72,7 @@
 #include <csignal>
 #include <cstring>
 #include <iostream>
+#include <limits>
 
 #include <signal.h>
 
@@ -126,7 +127,7 @@ LONG WINAPI exceptionHandler(LPEXCEPTION_POINTERS pExceptionInfo) {
 
 #define FRAMECOUNT 32
 
-static uint8_t stack[SIGSTKSZ * 2];
+static uint8_t stack[65536 * 2];
 
 void print_backtrace();
 

@@ -145,6 +145,10 @@ int main(int argc, char *argv[]) {
     pDebugLog = &debugLogOut;
   }
 
+  if (latencyLogPath.compare("STDOUT") == 0) {
+    noLogPrintOnScreen = false;
+    pLatencyFile = &std::cout;
+  } else 
   if (latencyLogPath.length() != 0) {
     std::string full(argv[3]);
 
