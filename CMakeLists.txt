@@ -78,7 +78,7 @@ else ()
   endif ()
 endif ()
 
-set(CMAKE_CXX_STANDARD 11)
+set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Specify source files
@@ -98,6 +98,7 @@ set(SRC_FTL
   ftl/config.cc
   ftl/ftl.cc
   ftl/page_mapping.cc
+  ftl/fast_mapping.cc
 )
 set(SRC_HIL_NVME
   hil/nvme/abstract_subsystem.cc

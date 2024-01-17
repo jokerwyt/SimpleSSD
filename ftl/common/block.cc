@@ -21,6 +21,8 @@
 
 #include <algorithm>
 #include <cstring>
+#include <cassert>
+#include "block.hh"
 
 namespace SimpleSSD {
 
@@ -271,6 +273,30 @@ bool Block::getPageInfo(uint32_t pageIndex, std::vector<uint64_t> &lpn,
   return map.any();
 }
 
+
+void Block::getPageInfo(uint32_t pageIndex, uint64_t &lpn, bool &valid, bool &erased) {
+  assert(pageIndex < pageCount);
+  lpn = pLPNs[pageIndex];
+  valid = pValidBits->test(pageIndex);
+  erased = pErasedBits->test(pageIndex);
+}
+
+uint32_t Block::getErasedPageCount() {
+  return pErasedBits->count();
+}
+
+uint32_t Block::getLPN(uint32_t pageIndex) {
+  return pLPNs[pageIndex];
+}
+
+bool Block::isValid(uint32_t pageIndex) {
+  return pValidBits->test(pageIndex);
+}
+
+bool Block::isCleanBlock() {
+  return getErasedPageCount() == pageCount;
+}
+
 bool Block::read(uint32_t pageIndex, uint32_t idx, uint64_t tick) {
   bool read = false;
 
@@ -306,9 +332,9 @@ bool Block::write(uint32_t pageIndex, uint64_t lpn, uint32_t idx,
   }
 
   if (write) {
-    if (pageIndex < pNextWritePageIndex[idx]) {
-      panic("Write to block should sequential");
-    }
+    // if (pageIndex < pNextWritePageIndex[idx]) {
+    //   panic("Write to block should sequential");
+    // }
 
     lastAccessed = tick;
 

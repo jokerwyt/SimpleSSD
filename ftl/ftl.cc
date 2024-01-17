@@ -20,6 +20,7 @@
 #include "ftl/ftl.hh"
 
 #include "ftl/page_mapping.hh"
+#include "ftl/fast_mapping.hh"
 
 namespace SimpleSSD {
 
@@ -43,6 +44,9 @@ FTL::FTL(ConfigReader &c, DRAM::AbstractDRAM *d) : conf(c), pDRAM(d) {
   switch (conf.readInt(CONFIG_FTL, FTL_MAPPING_MODE)) {
     case PAGE_MAPPING:
       pFTL = new PageMapping(conf, param, pPAL, pDRAM);
+      break;
+    case FAST_MAPPING:
+      pFTL = new FastMapping(conf, param, pPAL, pDRAM);
       break;
   }
 

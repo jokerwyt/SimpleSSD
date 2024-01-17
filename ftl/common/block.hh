@@ -66,7 +66,17 @@ class Block {
   uint32_t getDirtyPageCount();
   uint32_t getNextWritePageIndex();
   uint32_t getNextWritePageIndex(uint32_t);
+  bool isCleanBlock();
+
+
   bool getPageInfo(uint32_t, std::vector<uint64_t> &, Bitset &);
+
+  // only for simple non-superpage case.
+  void getPageInfo(uint32_t, uint64_t &, bool &, bool &);
+  uint32_t getErasedPageCount();
+  uint32_t getLPN(uint32_t);
+  bool isValid(uint32_t);
+  
   bool read(uint32_t, uint32_t, uint64_t);
   bool write(uint32_t, uint64_t, uint32_t, uint64_t);
   void erase();
