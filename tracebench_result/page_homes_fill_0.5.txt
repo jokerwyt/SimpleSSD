@@ -65547,7 +65547,7 @@ Latency (ns): min=54329.002000, max=1316813.886000, avg=909856.364000, stdev=379
 *** End of statistics ***
 *** Statistics of Event Engine ***
 Simulation Tick (ps): 60283696671088
-Host time duration (sec): 6.978623
-Event handled: 204179 (29257.777678 ops)
+Host time duration (sec): 7.090908
+Event handled: 204179 (28794.476832 ops)
 *** End of statistics ***
 End of simulation @ tick 60283696671088
