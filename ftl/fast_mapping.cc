@@ -25,7 +25,6 @@
 
 #include "util/algorithm.hh"
 #include "util/bitset.hh"
-#include "fast_mapping.hh"
 
 namespace SimpleSSD {
 
@@ -47,7 +46,7 @@ FastMapping::FastMapping(ConfigReader &c, Parameter &p, PAL::PAL *l,
 
   // init physicalBlocks
   for (uint32_t i = 0; i < param.totalPhysicalBlocks; i++) {
-    this->physicalBlocks.emplace_back(Block(i, param.pagesInBlock, param.ioUnitInPage));
+    this->physicalBlocks.emplace_back(BlockFast(i, param.pagesInBlock, 1 <= i && i <= this->kRWBlockCnt));
   }
   
   this->SWBlock = 0;
@@ -246,7 +245,7 @@ float FastMapping::freeBlockRatio() {
 void FastMapping::eraseInternal(uint32_t physicalBlockNum, uint64_t &tick, bool sendToPAL) {
 
   
-  Block &block = physicalBlocks[physicalBlockNum];
+  BlockFast &block = physicalBlocks[physicalBlockNum];
   block.erase();
 
   if (sendToPAL) {
@@ -284,7 +283,7 @@ void FastMapping::readInternal(Request &req, uint64_t &tick) {
 
   uint32_t pbn;
   uint32_t pageIdx;
-  Block *pBlock;
+  BlockFast *pBlock;
   BlockType blockType;
 
   if (findValidPage(req.lpn, pbn, pageIdx, pBlock, blockType)) {
@@ -324,7 +323,7 @@ void FastMapping::writeInternal(Request &req, uint64_t &tick, bool sendToPAL) {
 
   uint32_t physicalBlockNumber;
   uint32_t pageIndex;
-  Block *pBlock;
+  BlockFast *pBlock;
   BlockType blockType;
 
   if (!this->findValidPage(req.lpn, physicalBlockNumber, pageIndex, pBlock, blockType)) {
@@ -349,11 +348,6 @@ void FastMapping::writeInternal(Request &req, uint64_t &tick, bool sendToPAL) {
 
     // no matter where the valid page is, we should invalidate it first
 
-    if (pBlock->getBlockIndex() == 9120 && pageIndex == 0) {
-      int kkk = pageIndex;
-      (void) kkk;
-    }
-
     pBlock->invalidate(pageIndex, tick); // tick stays
     if (blockType == kBlockTypeRW) {
       // remove the original RW mapping
@@ -366,7 +360,7 @@ void FastMapping::writeInternal(Request &req, uint64_t &tick, bool sendToPAL) {
     if (pageOffset == 0) {
       // It's a beginning of one page. 
       assert(SWBlock.has_value());
-      Block *swblock = &physicalBlocks[SWBlock.value()];
+      BlockFast *swblock = &physicalBlocks[SWBlock.value()];
 
       // Check if sw block is a clean block.
       if (!swblock->isCleanBlock()) {
@@ -405,15 +399,11 @@ void FastMapping::writeInternal(Request &req, uint64_t &tick, bool sendToPAL) {
 
       if (SWBlockOwner_opt.has_value() && SWBlockOwner_opt.value() == logicalBlockNumber) {
         // write into SW log block, or start merging...
-        Block &swblock = physicalBlocks[SWBlock.value()];
+        BlockFast &swblock = physicalBlocks[SWBlock.value()];
         // We hope to see appending, but we still allow out-of-order page writing.
 
-        uint64_t lpn;
-        bool valid, erased;
 
-        swblock.getPageInfo(pageOffset, lpn, valid, erased);
-
-        if (erased) {
+        if (swblock.isErased(pageOffset)) {
           // clean page, just write into it.
           swblock.write(pageOffset, req.lpn, 0, tick); // tick stays
 
@@ -437,22 +427,27 @@ void FastMapping::writeInternal(Request &req, uint64_t &tick, bool sendToPAL) {
         }
       } else {
         // two case: 
-        // 1. SW Block has no owner
-        // 2. SW Block has another owner
+        // 1. SW BlockFast has no owner
+        // 2. SW BlockFast has another owner
         // for both cases, we write into RW log block instead. 
 
         // find a free RW log block
         uint32_t freeRwBlockNumber = std::numeric_limits<uint32_t>::max();
 
-        for (uint32_t rwBlockNum : RWBlocks) {
-          Block &rwblock = physicalBlocks[rwBlockNum];
-          if (rwblock.getErasedPageCount() != 0) {
-            freeRwBlockNumber = rwBlockNum;
-            break;
-          }
-        }
 
-        if (freeRwBlockNumber == std::numeric_limits<uint32_t>::max()) {
+
+        while (1) {
+          for (uint32_t rwBlockNum : RWBlocks) {
+            BlockFast &rwblock = physicalBlocks[rwBlockNum];
+            if (rwblock.getErasedPageCount() != 0) {
+              freeRwBlockNumber = rwBlockNum;
+              break;
+            }
+          }
+
+          if (freeRwBlockNumber != std::numeric_limits<uint32_t>::max())
+            break;
+
           // no free RW log block, we should recycle one.
 
           uint32_t victimRwBlock = RWBlocks.front(); 
@@ -462,15 +457,10 @@ void FastMapping::writeInternal(Request &req, uint64_t &tick, bool sendToPAL) {
           auto startTick = tick;
           mergeLogBlock(victimRwBlock, kBlockTypeRW, std::nullopt, startTick, palRequest, sendToPAL); // startTick += ...
           finishedAt = std::max(finishedAt, startTick); 
-
-          freeRwBlockNumber = getFreeBlock();
-          RWBlocks.push_back(freeRwBlockNumber);
-
-          physicalToLogicalBlockMapping[freeRwBlockNumber] = std::nullopt;
         }
 
         // write into rwblock
-        Block &rwblock = physicalBlocks[freeRwBlockNumber];
+        BlockFast &rwblock = physicalBlocks[freeRwBlockNumber];
         auto nextFreePage = rwblock.getNextWritePageIndex(0);
 
         rwblock.write(nextFreePage, req.lpn, 0, tick); // tick stays
@@ -502,7 +492,7 @@ void FastMapping::mergeLogBlock(uint32_t logBlockPhyNum,
   std::vector<std::pair<PAL::Request, uint64_t>> writeRequests; // pair: request, lpn
   std::vector<PAL::Request> eraseRequests;
 
-  Block &logBlock = physicalBlocks[logBlockPhyNum];
+  BlockFast &logBlock = physicalBlocks[logBlockPhyNum];
   if (blockType == kBlockTypeRW) {
     assert(additionalPage.has_value() == false);
     
@@ -510,11 +500,8 @@ void FastMapping::mergeLogBlock(uint32_t logBlockPhyNum,
     std::unordered_map<uint32_t, uint32_t> lbnToNewPbn, lbnToOldPbn;
 
     for (uint32_t i = 0; i < param.pagesInBlock; i++) {
-      uint64_t lpn;
-      bool valid, erased;
-      logBlock.getPageInfo(i, lpn, valid, erased);
-
-      if (valid) {
+      uint64_t lpn = logBlock.getLPN(i);
+      if (logBlock.isValid(i)) {
         logicalBlocks.emplace_back(convertPageToBlock(lpn));
 
         // remove RW log mapping
@@ -539,7 +526,7 @@ void FastMapping::mergeLogBlock(uint32_t logBlockPhyNum,
     for (auto lbn : logicalBlocks) {
       // old data blocks:
       uint32_t pbn = lbnToOldPbn[lbn];
-      Block &block = physicalBlocks[pbn];
+      BlockFast &block = physicalBlocks[pbn];
 
       // read from old data block, write to the new one
       for (uint32_t i = 0; i < param.pagesInBlock; i++) {
@@ -591,6 +578,11 @@ void FastMapping::mergeLogBlock(uint32_t logBlockPhyNum,
     // handle new RW block
     uint32_t newBlockPhyBlockNum = getFreeBlock();
     physicalToLogicalBlockMapping[newBlockPhyBlockNum] = std::nullopt;
+    RWBlocks.push_back(newBlockPhyBlockNum);
+
+    // handle pLPNs
+    physicalBlocks[newBlockPhyBlockNum].claimLPN(true);
+    physicalBlocks[logBlockPhyNum].claimLPN(false);
 
   } else if (blockType == kBlockTypeSW) {
     // TODO: additional page is not implemented yet.
@@ -619,29 +611,24 @@ void FastMapping::mergeLogBlock(uint32_t logBlockPhyNum,
       // recyle the old data block and SW block.
 
       uint32_t newDataBlockPhyNum = getFreeBlock();
-      Block &oldDataBlock = physicalBlocks[oldDataBlockPbn];
+      BlockFast &oldDataBlock = physicalBlocks[oldDataBlockPbn];
       physicalToLogicalBlockMapping[newDataBlockPhyNum] = SWOwner;
       logicalToPhysicalBlockMapping[SWOwner] = newDataBlockPhyNum;
 
       // generate all page read, write and block erase requests.
       for (uint32_t i = 0; i < param.pagesInBlock; i++) {
-        uint64_t lpn;
-        bool valid, erased;
-        logBlock.getPageInfo(i, lpn, valid, erased);
-
-        bool valid2;
-        oldDataBlock.getPageInfo(i, lpn, valid2, erased);
-
-        if (valid || valid2) {
+        if (logBlock.isValid(i) || oldDataBlock.isValid(i)) {
           // in log block or in data block, a copy is needed.
           PAL::Request readReq(req);
-          if (valid) {
+
+          if (logBlock.isValid(i)) {
             // read from log block
             readReq.blockIndex = logBlockPhyNum;
           } else {
             // read from data block
             readReq.blockIndex = oldDataBlockPbn;
           }
+
           readReq.pageIndex = i;
           readReq.ioFlag.set();
           readRequests.emplace_back(readReq);
@@ -713,7 +700,7 @@ void FastMapping::mergeLogBlock(uint32_t logBlockPhyNum,
 }
 
 bool FastMapping::findValidPage(uint32_t lpn, uint32_t &pbn, uint32_t &pageIdx,
-                                Block *&pBlock, enum BlockType &blockType) {
+                                BlockFast *&pBlock, enum BlockType &blockType) {
 
   // fill impossible value to all output parameters
   pbn = std::numeric_limits<uint32_t>::max();
@@ -732,12 +719,9 @@ bool FastMapping::findValidPage(uint32_t lpn, uint32_t &pbn, uint32_t &pageIdx,
 
 
   // check if the page is valid
-  Block &block = physicalBlocks[physicalBlockNumber];
+  BlockFast &block = physicalBlocks[physicalBlockNumber];
 
-  uint64_t logicalPageNumber;
-  bool valid, erased;
-
-  block.getPageInfo(this->convertPageToOffsetInBlock(lpn), logicalPageNumber, valid, erased);
+  bool valid = block.isValid(this->convertPageToOffsetInBlock(lpn));
 
   if (valid) {
     // locate it in the data block.
@@ -752,10 +736,9 @@ bool FastMapping::findValidPage(uint32_t lpn, uint32_t &pbn, uint32_t &pageIdx,
 
     // in SW block?
     if (SWBlock.has_value()) {
-      Block &swblock = physicalBlocks[SWBlock.value()];
+      BlockFast &swblock = physicalBlocks[SWBlock.value()];
       uint32_t i = this->convertPageToOffsetInBlock(lpn);
-      swblock.getPageInfo(i, logicalPageNumber, valid, erased);
-      if (valid && logicalPageNumber == lpn) {
+      if (swblock.isValid(i) && physicalToLogicalBlockMapping[SWBlock.value()] == this->convertPageToBlock(lpn)) {
         // found
         pbn = SWBlock.value();
         pageIdx = i;
@@ -769,10 +752,9 @@ bool FastMapping::findValidPage(uint32_t lpn, uint32_t &pbn, uint32_t &pageIdx,
     auto it = RWlogMapping.find(lpn);
     if (it != RWlogMapping.end()) {
       auto &pair = it->second;
-      Block &rwblock = physicalBlocks[pair.first];
+      BlockFast &rwblock = physicalBlocks[pair.first];
       uint32_t i = pair.second;
-      rwblock.getPageInfo(i, logicalPageNumber, valid, erased);
-      assert(valid && logicalPageNumber == lpn);
+      assert(rwblock.isValid(i) && rwblock.getLPN(i)== lpn);
       pbn = pair.first;
       pageIdx = i;
       pBlock = &rwblock;

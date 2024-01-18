@@ -17,8 +17,8 @@
  * along with SimpleSSD.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#ifndef __FTL_COMMON_BLOCK__
-#define __FTL_COMMON_BLOCK__
+#ifndef __FTL_COMMON_BLOCK_FAST__
+#define __FTL_COMMON_BLOCK_FAST__
 
 #include <cinttypes>
 #include <vector>
@@ -29,7 +29,7 @@ namespace SimpleSSD {
 
 namespace FTL {
 
-class Block {
+class BlockFast {
  private:
   uint32_t idx;
   uint32_t pageCount;
@@ -41,22 +41,17 @@ class Block {
   Bitset *pErasedBits;
   uint64_t *pLPNs;
 
-  // Following variables are used when ioUnitInPage > 1
-  std::vector<Bitset> validBits;
-  std::vector<Bitset> erasedBits;
-  uint64_t **ppLPNs;
-
   uint64_t lastAccessed;
   uint32_t eraseCount;
 
  public:
-  Block(uint32_t, uint32_t, uint32_t);
-  Block(const Block &);      // Copy constructor
-  Block(Block &&) noexcept;  // Move constructor
-  ~Block();
+  BlockFast(uint32_t, uint32_t, bool);
+  BlockFast(const BlockFast &);      // Copy constructor
+  BlockFast(BlockFast &&) noexcept;  // Move constructor
+  ~BlockFast();
 
-  Block &operator=(const Block &);  // Copy assignment
-  Block &operator=(Block &&);       // Move assignment
+  BlockFast &operator=(const BlockFast &);  // Copy assignment
+  BlockFast &operator=(BlockFast &&);       // Move assignment
 
   uint32_t getBlockIndex() const;
   uint64_t getLastAccessedTime();
@@ -66,7 +61,14 @@ class Block {
   uint32_t getDirtyPageCount();
   uint32_t getNextWritePageIndex();
   uint32_t getNextWritePageIndex(uint32_t);
-  bool getPageInfo(uint32_t, std::vector<uint64_t> &, Bitset &);
+  bool isCleanBlock();
+
+  uint32_t getErasedPageCount();
+  uint32_t getLPN(uint32_t);
+  bool isValid(uint32_t);
+  bool isErased(uint32_t);
+  void claimLPN(bool exist);
+  
   bool read(uint32_t, uint32_t, uint64_t);
   bool write(uint32_t, uint64_t, uint32_t, uint64_t);
   void erase();

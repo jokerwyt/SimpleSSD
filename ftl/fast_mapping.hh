@@ -27,7 +27,7 @@
 #include <optional>
 
 #include "ftl/abstract_ftl.hh"
-#include "ftl/common/block.hh"
+#include "ftl/common/block_fast.hh"
 #include "ftl/ftl.hh"
 #include "pal/pal.hh"
 
@@ -100,7 +100,7 @@ class FastMapping : public AbstractFTL {
       physicalToLogicalBlockMapping;
 
   // physical block number -> block info
-  std::vector<Block> physicalBlocks; // in use
+  std::vector<BlockFast> physicalBlocks; // in use
   std::deque<uint32_t> freeBlocks;
 
   std::unordered_map<uint64_t, std::pair<uint32_t, uint32_t>>
@@ -140,7 +140,7 @@ class FastMapping : public AbstractFTL {
   // find the only one valid page
   // if found return true, otherwise return false
   bool findValidPage(uint32_t lpn, uint32_t &pbn, uint32_t &pageIdx, 
-    Block *&pBlock, enum BlockType &blockType);
+    BlockFast *&pBlock, enum BlockType &blockType);
 
   void eraseInternal(uint32_t physicalBlockNum, uint64_t &tick, bool sendToPAL);
 

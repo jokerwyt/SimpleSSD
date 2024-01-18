@@ -93,6 +93,7 @@ set(SRC_DRAM
 )
 set(SRC_FTL_COMMON
   ftl/common/block.cc
+  ftl/common/block_fast.cc
 )
 set(SRC_FTL
   ftl/config.cc
