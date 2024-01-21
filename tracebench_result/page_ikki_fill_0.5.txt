@@ -65539,7 +65539,7 @@ SimpleSSD Standalone v2.0
 [2K                                                           *** Statistics of Trace Replayer ***
 Tick: 48526224753024
 Time (ps): 0 - 48526224753024 (48526224753024)
-I/O (bytes): 0 (0.000000 B/s)
+I/O (bytes): 711663616 (14665546.714628 B/s)
 I/O (counts): 65536 (Read: 14504, Write: 51032)
 *** End of statistics ***
 *** Statistics of Block I/O Entry ***
@@ -65547,7 +65547,7 @@ Latency (ns): min=54329.002000, max=1316813.886000, avg=730451.580094, stdev=329
 *** End of statistics ***
 *** Statistics of Event Engine ***
 Simulation Tick (ps): 48526224753024
-Host time duration (sec): 7.562268
-Event handled: 202703 (26804.525081 ops)
+Host time duration (sec): 7.404415
+Event handled: 202703 (27375.964579 ops)
 *** End of statistics ***
 End of simulation @ tick 48526224753024

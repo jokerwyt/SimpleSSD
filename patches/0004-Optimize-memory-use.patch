@@ -1,0 +1,19 @@
+From 4743869323efab5f633e2145b7bd31e43b6db986 Mon Sep 17 00:00:00 2001
+From: jokerwyt <914554688@qq.com>
+Date: Thu, 18 Jan 2024 11:09:44 +0800
+Subject: [PATCH 4/4] Optimize memory use
+
+---
+ simplessd | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/simplessd b/simplessd
+index 896d255..f622a2a 160000
+--- a/simplessd
++++ b/simplessd
+@@ -1 +1 @@
+-Subproject commit 896d255faf2a4181f49f02032136038197072b1a
++Subproject commit f622a2a956f4710622816721faa4a984f5b6610b
+-- 
+2.34.1
+

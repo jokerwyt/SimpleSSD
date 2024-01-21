@@ -1,0 +1,846 @@
+From f622a2a956f4710622816721faa4a984f5b6610b Mon Sep 17 00:00:00 2001
+From: jokerwyt <914554688@qq.com>
+Date: Thu, 18 Jan 2024 11:08:45 +0800
+Subject: [PATCH 2/2] Optimize memory use
+
+---
+ CMakeLists.txt           |   1 +
+ ftl/common/block.cc      |  32 +---
+ ftl/common/block.hh      |  10 --
+ ftl/common/block_fast.cc | 340 +++++++++++++++++++++++++++++++++++++++
+ ftl/common/block_fast.hh |  82 ++++++++++
+ ftl/fast_mapping.cc      | 104 +++++-------
+ ftl/fast_mapping.hh      |   6 +-
+ 7 files changed, 472 insertions(+), 103 deletions(-)
+ create mode 100644 ftl/common/block_fast.cc
+ create mode 100644 ftl/common/block_fast.hh
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index aedc52b..1ed5247 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -93,6 +93,7 @@ set(SRC_DRAM
+ )
+ set(SRC_FTL_COMMON
+   ftl/common/block.cc
++  ftl/common/block_fast.cc
+ )
+ set(SRC_FTL
+   ftl/config.cc
+diff --git a/ftl/common/block.cc b/ftl/common/block.cc
+index ddd176f..d7be114 100644
+--- a/ftl/common/block.cc
++++ b/ftl/common/block.cc
+@@ -21,8 +21,6 @@
+ 
+ #include <algorithm>
+ #include <cstring>
+-#include <cassert>
+-#include "block.hh"
+ 
+ namespace SimpleSSD {
+ 
+@@ -273,30 +271,6 @@ bool Block::getPageInfo(uint32_t pageIndex, std::vector<uint64_t> &lpn,
+   return map.any();
+ }
+ 
+-
+-void Block::getPageInfo(uint32_t pageIndex, uint64_t &lpn, bool &valid, bool &erased) {
+-  assert(pageIndex < pageCount);
+-  lpn = pLPNs[pageIndex];
+-  valid = pValidBits->test(pageIndex);
+-  erased = pErasedBits->test(pageIndex);
+-}
+-
+-uint32_t Block::getErasedPageCount() {
+-  return pErasedBits->count();
+-}
+-
+-uint32_t Block::getLPN(uint32_t pageIndex) {
+-  return pLPNs[pageIndex];
+-}
+-
+-bool Block::isValid(uint32_t pageIndex) {
+-  return pValidBits->test(pageIndex);
+-}
+-
+-bool Block::isCleanBlock() {
+-  return getErasedPageCount() == pageCount;
+-}
+-
+ bool Block::read(uint32_t pageIndex, uint32_t idx, uint64_t tick) {
+   bool read = false;
+ 
+@@ -332,9 +306,9 @@ bool Block::write(uint32_t pageIndex, uint64_t lpn, uint32_t idx,
+   }
+ 
+   if (write) {
+-    // if (pageIndex < pNextWritePageIndex[idx]) {
+-    //   panic("Write to block should sequential");
+-    // }
++    if (pageIndex < pNextWritePageIndex[idx]) {
++      panic("Write to block should sequential");
++    }
+ 
+     lastAccessed = tick;
+ 
+diff --git a/ftl/common/block.hh b/ftl/common/block.hh
+index b1368f3..edceb4a 100644
+--- a/ftl/common/block.hh
++++ b/ftl/common/block.hh
+@@ -66,17 +66,7 @@ class Block {
+   uint32_t getDirtyPageCount();
+   uint32_t getNextWritePageIndex();
+   uint32_t getNextWritePageIndex(uint32_t);
+-  bool isCleanBlock();
+-
+-
+   bool getPageInfo(uint32_t, std::vector<uint64_t> &, Bitset &);
+-
+-  // only for simple non-superpage case.
+-  void getPageInfo(uint32_t, uint64_t &, bool &, bool &);
+-  uint32_t getErasedPageCount();
+-  uint32_t getLPN(uint32_t);
+-  bool isValid(uint32_t);
+-  
+   bool read(uint32_t, uint32_t, uint64_t);
+   bool write(uint32_t, uint64_t, uint32_t, uint64_t);
+   void erase();
+diff --git a/ftl/common/block_fast.cc b/ftl/common/block_fast.cc
+new file mode 100644
+index 0000000..107de47
+--- /dev/null
++++ b/ftl/common/block_fast.cc
+@@ -0,0 +1,340 @@
++/*
++ * Copyright (C) 2017 CAMELab
++ *
++ * This file is part of SimpleSSD.
++ *
++ * SimpleSSD is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation, either version 3 of the License, or
++ * (at your option) any later version.
++ *
++ * SimpleSSD is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with SimpleSSD.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++#include "ftl/common/block_fast.hh"
++
++#include <algorithm>
++#include <cstring>
++#include <cassert>
++#include "block.hh"
++#include "block_fast.hh"
++
++namespace SimpleSSD {
++
++namespace FTL {
++
++BlockFast::BlockFast(uint32_t blockIdx, uint32_t count, bool createLPNs)
++    : idx(blockIdx),
++      pageCount(count),
++      ioUnitInPage(1),
++      pValidBits(nullptr),
++      pErasedBits(nullptr),
++      pLPNs(nullptr),
++      lastAccessed(0),
++      eraseCount(0) {
++  if (ioUnitInPage == 1) {
++    pValidBits = new Bitset(pageCount);
++    pErasedBits = new Bitset(pageCount);
++
++    if (createLPNs)
++      pLPNs = (uint64_t *)calloc(pageCount, sizeof(uint64_t));
++  }
++  else if (ioUnitInPage > 1) {
++    assert(0);
++  }
++  else {
++    panic("Invalid I/O unit in page");
++  }
++
++  // C-style allocation
++  pNextWritePageIndex = (uint32_t *)calloc(ioUnitInPage, sizeof(uint32_t));
++
++  erase();
++  eraseCount = 0;
++}
++
++BlockFast::BlockFast(const BlockFast &old)
++    : BlockFast(old.idx, old.pageCount, old.pLPNs != nullptr) {
++  if (ioUnitInPage == 1) {
++    *pValidBits = *old.pValidBits;
++    *pErasedBits = *old.pErasedBits;
++
++    if (old.pLPNs != nullptr)
++      memcpy(pLPNs, old.pLPNs, pageCount * sizeof(uint64_t));
++  }
++  else {
++    assert(0);
++  }
++
++  memcpy(pNextWritePageIndex, old.pNextWritePageIndex,
++         ioUnitInPage * sizeof(uint32_t));
++
++  eraseCount = old.eraseCount;
++}
++
++BlockFast::BlockFast(BlockFast &&old) noexcept
++    : idx(std::move(old.idx)),
++      pageCount(std::move(old.pageCount)),
++      ioUnitInPage(std::move(old.ioUnitInPage)),
++      pNextWritePageIndex(std::move(old.pNextWritePageIndex)),
++      pValidBits(std::move(old.pValidBits)),
++      pErasedBits(std::move(old.pErasedBits)),
++      pLPNs(std::move(old.pLPNs)),
++      lastAccessed(std::move(old.lastAccessed)),
++      eraseCount(std::move(old.eraseCount)) {
++  // TODO Use std::exchange to set old value to null (C++14)
++  old.idx = 0;
++  old.pageCount = 0;
++  old.ioUnitInPage = 0;
++  old.pNextWritePageIndex = nullptr;
++  old.pValidBits = nullptr;
++  old.pErasedBits = nullptr;
++  old.pLPNs = nullptr;
++  old.lastAccessed = 0;
++  old.eraseCount = 0;
++}
++
++BlockFast::~BlockFast() {
++  free(pNextWritePageIndex);
++  if (pLPNs)
++    free(pLPNs);
++
++  delete pValidBits;
++  delete pErasedBits;
++
++  pNextWritePageIndex = nullptr;
++  pLPNs = nullptr;
++  pValidBits = nullptr;
++  pErasedBits = nullptr;
++}
++
++BlockFast &BlockFast::operator=(const BlockFast &rhs) {
++  if (this != &rhs) {
++    this->~BlockFast();
++    *this = BlockFast(rhs);  // Call copy constructor
++  }
++
++  return *this;
++}
++
++BlockFast &BlockFast::operator=(BlockFast &&rhs) {
++  if (this != &rhs) {
++    this->~BlockFast();
++
++    idx = std::move(rhs.idx);
++    pageCount = std::move(rhs.pageCount);
++    ioUnitInPage = std::move(rhs.ioUnitInPage);
++    pNextWritePageIndex = std::move(rhs.pNextWritePageIndex);
++    pValidBits = std::move(rhs.pValidBits);
++    pErasedBits = std::move(rhs.pErasedBits);
++    pLPNs = std::move(rhs.pLPNs);
++    lastAccessed = std::move(rhs.lastAccessed);
++    eraseCount = std::move(rhs.eraseCount);
++
++    rhs.pNextWritePageIndex = nullptr;
++    rhs.pValidBits = nullptr;
++    rhs.pErasedBits = nullptr;
++    rhs.pLPNs = nullptr;
++    rhs.lastAccessed = 0;
++    rhs.eraseCount = 0;
++  }
++
++  return *this;
++}
++
++uint32_t BlockFast::getBlockIndex() const {
++  return idx;
++}
++
++uint64_t BlockFast::getLastAccessedTime() {
++  return lastAccessed;
++}
++
++uint32_t BlockFast::getEraseCount() {
++  return eraseCount;
++}
++
++uint32_t BlockFast::getValidPageCount() {
++  uint32_t ret = 0;
++
++  if (ioUnitInPage == 1) {
++    ret = pValidBits->count();
++  }
++  else {
++    assert(0);
++  }
++
++  return ret;
++}
++
++uint32_t BlockFast::getValidPageCountRaw() {
++  uint32_t ret = 0;
++
++  if (ioUnitInPage == 1) {
++    // Same as getValidPageCount()
++    ret = pValidBits->count();
++  }
++  else {
++    assert(0);
++  }
++
++  return ret;
++}
++
++uint32_t BlockFast::getDirtyPageCount() {
++  uint32_t ret = 0;
++
++  if (ioUnitInPage == 1) {
++    ret = (~(*pValidBits | *pErasedBits)).count();
++  }
++  else {
++    assert(0);
++  }
++
++  return ret;
++}
++
++uint32_t BlockFast::getNextWritePageIndex() {
++  uint32_t idx = 0;
++
++  for (uint32_t i = 0; i < ioUnitInPage; i++) {
++    if (idx < pNextWritePageIndex[i]) {
++      idx = pNextWritePageIndex[i];
++    }
++  }
++
++  return idx;
++}
++
++uint32_t BlockFast::getNextWritePageIndex(uint32_t idx) {
++  return pNextWritePageIndex[idx];
++}
++
++uint32_t BlockFast::getErasedPageCount() {
++  return pErasedBits->count();
++}
++
++uint32_t BlockFast::getLPN(uint32_t pageIndex) {
++  assert(pLPNs != nullptr);
++  return pLPNs[pageIndex];
++}
++
++bool BlockFast::isValid(uint32_t pageIndex) {
++  return pValidBits->test(pageIndex);
++}
++
++bool BlockFast::isErased(uint32_t pageIndex) {
++  return pErasedBits->test(pageIndex);
++}
++
++void BlockFast::claimLPN(bool exist) {
++  if (exist) {
++    if (pLPNs == nullptr)
++      pLPNs = (uint64_t *)calloc(pageCount, sizeof(uint64_t));
++    else 
++      assert(0);
++  } else {
++    if (pLPNs != nullptr) {
++      free(pLPNs);
++      pLPNs = nullptr;
++    }
++    else 
++      assert(0);
++  }
++}
++
++bool BlockFast::isCleanBlock() {
++  return getErasedPageCount() == pageCount;
++}
++
++bool BlockFast::read(uint32_t pageIndex, uint32_t idx, uint64_t tick) {
++  bool read = false;
++
++  if (ioUnitInPage == 1 && idx == 0) {
++    read = pValidBits->test(pageIndex);
++  }
++  else if (idx < ioUnitInPage) {
++    assert(0);
++  }
++  else {
++    panic("I/O map size mismatch");
++  }
++
++  if (read) {
++    lastAccessed = tick;
++  }
++
++  return read;
++}
++
++bool BlockFast::write(uint32_t pageIndex, uint64_t lpn, uint32_t idx,
++                  uint64_t tick) {
++  bool write = false;
++
++  if (ioUnitInPage == 1 && idx == 0) {
++    write = pErasedBits->test(pageIndex);
++  }
++  else if (idx < ioUnitInPage) {
++    assert(0);
++  }
++  else {
++    panic("I/O map size mismatch");
++  }
++
++  if (write) {
++    lastAccessed = tick;
++
++    if (ioUnitInPage == 1) {
++      pErasedBits->reset(pageIndex);
++      pValidBits->set(pageIndex);
++
++      if (pLPNs)
++        pLPNs[pageIndex] = lpn;
++    }
++    else {
++      assert(0);
++    }
++
++    pNextWritePageIndex[idx] = pageIndex + 1;
++  }
++  else {
++    panic("Write to non erased page");
++  }
++
++  return write;
++}
++
++void BlockFast::erase() {
++  if (ioUnitInPage == 1) {
++    pValidBits->reset();
++    pErasedBits->set();
++  }
++  else {
++    assert(0);
++  }
++
++  memset(pNextWritePageIndex, 0, sizeof(uint32_t) * ioUnitInPage);
++
++  eraseCount++;
++}
++
++void BlockFast::invalidate(uint32_t pageIndex, uint32_t idx) {
++  (void) idx;
++
++  if (ioUnitInPage == 1) {
++    pValidBits->reset(pageIndex);
++  }
++  else {
++    assert(0);
++  }
++}
++
++}  // namespace FTL
++
++}  // namespace SimpleSSD
+diff --git a/ftl/common/block_fast.hh b/ftl/common/block_fast.hh
+new file mode 100644
+index 0000000..bc11927
+--- /dev/null
++++ b/ftl/common/block_fast.hh
+@@ -0,0 +1,82 @@
++/*
++ * Copyright (C) 2017 CAMELab
++ *
++ * This file is part of SimpleSSD.
++ *
++ * SimpleSSD is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation, either version 3 of the License, or
++ * (at your option) any later version.
++ *
++ * SimpleSSD is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with SimpleSSD.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++#ifndef __FTL_COMMON_BLOCK_FAST__
++#define __FTL_COMMON_BLOCK_FAST__
++
++#include <cinttypes>
++#include <vector>
++
++#include "util/bitset.hh"
++
++namespace SimpleSSD {
++
++namespace FTL {
++
++class BlockFast {
++ private:
++  uint32_t idx;
++  uint32_t pageCount;
++  uint32_t ioUnitInPage;
++  uint32_t *pNextWritePageIndex;
++
++  // Following variables are used when ioUnitInPage == 1
++  Bitset *pValidBits;
++  Bitset *pErasedBits;
++  uint64_t *pLPNs;
++
++  uint64_t lastAccessed;
++  uint32_t eraseCount;
++
++ public:
++  BlockFast(uint32_t, uint32_t, bool);
++  BlockFast(const BlockFast &);      // Copy constructor
++  BlockFast(BlockFast &&) noexcept;  // Move constructor
++  ~BlockFast();
++
++  BlockFast &operator=(const BlockFast &);  // Copy assignment
++  BlockFast &operator=(BlockFast &&);       // Move assignment
++
++  uint32_t getBlockIndex() const;
++  uint64_t getLastAccessedTime();
++  uint32_t getEraseCount();
++  uint32_t getValidPageCount();
++  uint32_t getValidPageCountRaw();
++  uint32_t getDirtyPageCount();
++  uint32_t getNextWritePageIndex();
++  uint32_t getNextWritePageIndex(uint32_t);
++  bool isCleanBlock();
++
++  uint32_t getErasedPageCount();
++  uint32_t getLPN(uint32_t);
++  bool isValid(uint32_t);
++  bool isErased(uint32_t);
++  void claimLPN(bool exist);
++  
++  bool read(uint32_t, uint32_t, uint64_t);
++  bool write(uint32_t, uint64_t, uint32_t, uint64_t);
++  void erase();
++  void invalidate(uint32_t, uint32_t);
++};
++
++}  // namespace FTL
++
++}  // namespace SimpleSSD
++
++#endif
+diff --git a/ftl/fast_mapping.cc b/ftl/fast_mapping.cc
+index e1b6981..d01f6ae 100644
+--- a/ftl/fast_mapping.cc
++++ b/ftl/fast_mapping.cc
+@@ -25,7 +25,6 @@
+ 
+ #include "util/algorithm.hh"
+ #include "util/bitset.hh"
+-#include "fast_mapping.hh"
+ 
+ namespace SimpleSSD {
+ 
+@@ -47,7 +46,7 @@ FastMapping::FastMapping(ConfigReader &c, Parameter &p, PAL::PAL *l,
+ 
+   // init physicalBlocks
+   for (uint32_t i = 0; i < param.totalPhysicalBlocks; i++) {
+-    this->physicalBlocks.emplace_back(Block(i, param.pagesInBlock, param.ioUnitInPage));
++    this->physicalBlocks.emplace_back(BlockFast(i, param.pagesInBlock, 1 <= i && i <= this->kRWBlockCnt));
+   }
+   
+   this->SWBlock = 0;
+@@ -246,7 +245,7 @@ float FastMapping::freeBlockRatio() {
+ void FastMapping::eraseInternal(uint32_t physicalBlockNum, uint64_t &tick, bool sendToPAL) {
+ 
+   
+-  Block &block = physicalBlocks[physicalBlockNum];
++  BlockFast &block = physicalBlocks[physicalBlockNum];
+   block.erase();
+ 
+   if (sendToPAL) {
+@@ -284,7 +283,7 @@ void FastMapping::readInternal(Request &req, uint64_t &tick) {
+ 
+   uint32_t pbn;
+   uint32_t pageIdx;
+-  Block *pBlock;
++  BlockFast *pBlock;
+   BlockType blockType;
+ 
+   if (findValidPage(req.lpn, pbn, pageIdx, pBlock, blockType)) {
+@@ -324,7 +323,7 @@ void FastMapping::writeInternal(Request &req, uint64_t &tick, bool sendToPAL) {
+ 
+   uint32_t physicalBlockNumber;
+   uint32_t pageIndex;
+-  Block *pBlock;
++  BlockFast *pBlock;
+   BlockType blockType;
+ 
+   if (!this->findValidPage(req.lpn, physicalBlockNumber, pageIndex, pBlock, blockType)) {
+@@ -349,11 +348,6 @@ void FastMapping::writeInternal(Request &req, uint64_t &tick, bool sendToPAL) {
+ 
+     // no matter where the valid page is, we should invalidate it first
+ 
+-    if (pBlock->getBlockIndex() == 9120 && pageIndex == 0) {
+-      int kkk = pageIndex;
+-      (void) kkk;
+-    }
+-
+     pBlock->invalidate(pageIndex, tick); // tick stays
+     if (blockType == kBlockTypeRW) {
+       // remove the original RW mapping
+@@ -366,7 +360,7 @@ void FastMapping::writeInternal(Request &req, uint64_t &tick, bool sendToPAL) {
+     if (pageOffset == 0) {
+       // It's a beginning of one page. 
+       assert(SWBlock.has_value());
+-      Block *swblock = &physicalBlocks[SWBlock.value()];
++      BlockFast *swblock = &physicalBlocks[SWBlock.value()];
+ 
+       // Check if sw block is a clean block.
+       if (!swblock->isCleanBlock()) {
+@@ -405,15 +399,11 @@ void FastMapping::writeInternal(Request &req, uint64_t &tick, bool sendToPAL) {
+ 
+       if (SWBlockOwner_opt.has_value() && SWBlockOwner_opt.value() == logicalBlockNumber) {
+         // write into SW log block, or start merging...
+-        Block &swblock = physicalBlocks[SWBlock.value()];
++        BlockFast &swblock = physicalBlocks[SWBlock.value()];
+         // We hope to see appending, but we still allow out-of-order page writing.
+ 
+-        uint64_t lpn;
+-        bool valid, erased;
+-
+-        swblock.getPageInfo(pageOffset, lpn, valid, erased);
+ 
+-        if (erased) {
++        if (swblock.isErased(pageOffset)) {
+           // clean page, just write into it.
+           swblock.write(pageOffset, req.lpn, 0, tick); // tick stays
+ 
+@@ -437,22 +427,27 @@ void FastMapping::writeInternal(Request &req, uint64_t &tick, bool sendToPAL) {
+         }
+       } else {
+         // two case: 
+-        // 1. SW Block has no owner
+-        // 2. SW Block has another owner
++        // 1. SW BlockFast has no owner
++        // 2. SW BlockFast has another owner
+         // for both cases, we write into RW log block instead. 
+ 
+         // find a free RW log block
+         uint32_t freeRwBlockNumber = std::numeric_limits<uint32_t>::max();
+ 
+-        for (uint32_t rwBlockNum : RWBlocks) {
+-          Block &rwblock = physicalBlocks[rwBlockNum];
+-          if (rwblock.getErasedPageCount() != 0) {
+-            freeRwBlockNumber = rwBlockNum;
+-            break;
++
++
++        while (1) {
++          for (uint32_t rwBlockNum : RWBlocks) {
++            BlockFast &rwblock = physicalBlocks[rwBlockNum];
++            if (rwblock.getErasedPageCount() != 0) {
++              freeRwBlockNumber = rwBlockNum;
++              break;
++            }
+           }
+-        }
+ 
+-        if (freeRwBlockNumber == std::numeric_limits<uint32_t>::max()) {
++          if (freeRwBlockNumber != std::numeric_limits<uint32_t>::max())
++            break;
++
+           // no free RW log block, we should recycle one.
+ 
+           uint32_t victimRwBlock = RWBlocks.front(); 
+@@ -462,15 +457,10 @@ void FastMapping::writeInternal(Request &req, uint64_t &tick, bool sendToPAL) {
+           auto startTick = tick;
+           mergeLogBlock(victimRwBlock, kBlockTypeRW, std::nullopt, startTick, palRequest, sendToPAL); // startTick += ...
+           finishedAt = std::max(finishedAt, startTick); 
+-
+-          freeRwBlockNumber = getFreeBlock();
+-          RWBlocks.push_back(freeRwBlockNumber);
+-
+-          physicalToLogicalBlockMapping[freeRwBlockNumber] = std::nullopt;
+         }
+ 
+         // write into rwblock
+-        Block &rwblock = physicalBlocks[freeRwBlockNumber];
++        BlockFast &rwblock = physicalBlocks[freeRwBlockNumber];
+         auto nextFreePage = rwblock.getNextWritePageIndex(0);
+ 
+         rwblock.write(nextFreePage, req.lpn, 0, tick); // tick stays
+@@ -502,7 +492,7 @@ void FastMapping::mergeLogBlock(uint32_t logBlockPhyNum,
+   std::vector<std::pair<PAL::Request, uint64_t>> writeRequests; // pair: request, lpn
+   std::vector<PAL::Request> eraseRequests;
+ 
+-  Block &logBlock = physicalBlocks[logBlockPhyNum];
++  BlockFast &logBlock = physicalBlocks[logBlockPhyNum];
+   if (blockType == kBlockTypeRW) {
+     assert(additionalPage.has_value() == false);
+     
+@@ -510,11 +500,8 @@ void FastMapping::mergeLogBlock(uint32_t logBlockPhyNum,
+     std::unordered_map<uint32_t, uint32_t> lbnToNewPbn, lbnToOldPbn;
+ 
+     for (uint32_t i = 0; i < param.pagesInBlock; i++) {
+-      uint64_t lpn;
+-      bool valid, erased;
+-      logBlock.getPageInfo(i, lpn, valid, erased);
+-
+-      if (valid) {
++      uint64_t lpn = logBlock.getLPN(i);
++      if (logBlock.isValid(i)) {
+         logicalBlocks.emplace_back(convertPageToBlock(lpn));
+ 
+         // remove RW log mapping
+@@ -539,7 +526,7 @@ void FastMapping::mergeLogBlock(uint32_t logBlockPhyNum,
+     for (auto lbn : logicalBlocks) {
+       // old data blocks:
+       uint32_t pbn = lbnToOldPbn[lbn];
+-      Block &block = physicalBlocks[pbn];
++      BlockFast &block = physicalBlocks[pbn];
+ 
+       // read from old data block, write to the new one
+       for (uint32_t i = 0; i < param.pagesInBlock; i++) {
+@@ -591,6 +578,11 @@ void FastMapping::mergeLogBlock(uint32_t logBlockPhyNum,
+     // handle new RW block
+     uint32_t newBlockPhyBlockNum = getFreeBlock();
+     physicalToLogicalBlockMapping[newBlockPhyBlockNum] = std::nullopt;
++    RWBlocks.push_back(newBlockPhyBlockNum);
++
++    // handle pLPNs
++    physicalBlocks[newBlockPhyBlockNum].claimLPN(true);
++    physicalBlocks[logBlockPhyNum].claimLPN(false);
+ 
+   } else if (blockType == kBlockTypeSW) {
+     // TODO: additional page is not implemented yet.
+@@ -619,29 +611,24 @@ void FastMapping::mergeLogBlock(uint32_t logBlockPhyNum,
+       // recyle the old data block and SW block.
+ 
+       uint32_t newDataBlockPhyNum = getFreeBlock();
+-      Block &oldDataBlock = physicalBlocks[oldDataBlockPbn];
++      BlockFast &oldDataBlock = physicalBlocks[oldDataBlockPbn];
+       physicalToLogicalBlockMapping[newDataBlockPhyNum] = SWOwner;
+       logicalToPhysicalBlockMapping[SWOwner] = newDataBlockPhyNum;
+ 
+       // generate all page read, write and block erase requests.
+       for (uint32_t i = 0; i < param.pagesInBlock; i++) {
+-        uint64_t lpn;
+-        bool valid, erased;
+-        logBlock.getPageInfo(i, lpn, valid, erased);
+-
+-        bool valid2;
+-        oldDataBlock.getPageInfo(i, lpn, valid2, erased);
+-
+-        if (valid || valid2) {
++        if (logBlock.isValid(i) || oldDataBlock.isValid(i)) {
+           // in log block or in data block, a copy is needed.
+           PAL::Request readReq(req);
+-          if (valid) {
++
++          if (logBlock.isValid(i)) {
+             // read from log block
+             readReq.blockIndex = logBlockPhyNum;
+           } else {
+             // read from data block
+             readReq.blockIndex = oldDataBlockPbn;
+           }
++
+           readReq.pageIndex = i;
+           readReq.ioFlag.set();
+           readRequests.emplace_back(readReq);
+@@ -713,7 +700,7 @@ void FastMapping::mergeLogBlock(uint32_t logBlockPhyNum,
+ }
+ 
+ bool FastMapping::findValidPage(uint32_t lpn, uint32_t &pbn, uint32_t &pageIdx,
+-                                Block *&pBlock, enum BlockType &blockType) {
++                                BlockFast *&pBlock, enum BlockType &blockType) {
+ 
+   // fill impossible value to all output parameters
+   pbn = std::numeric_limits<uint32_t>::max();
+@@ -732,12 +719,9 @@ bool FastMapping::findValidPage(uint32_t lpn, uint32_t &pbn, uint32_t &pageIdx,
+ 
+ 
+   // check if the page is valid
+-  Block &block = physicalBlocks[physicalBlockNumber];
+-
+-  uint64_t logicalPageNumber;
+-  bool valid, erased;
++  BlockFast &block = physicalBlocks[physicalBlockNumber];
+ 
+-  block.getPageInfo(this->convertPageToOffsetInBlock(lpn), logicalPageNumber, valid, erased);
++  bool valid = block.isValid(this->convertPageToOffsetInBlock(lpn));
+ 
+   if (valid) {
+     // locate it in the data block.
+@@ -752,10 +736,9 @@ bool FastMapping::findValidPage(uint32_t lpn, uint32_t &pbn, uint32_t &pageIdx,
+ 
+     // in SW block?
+     if (SWBlock.has_value()) {
+-      Block &swblock = physicalBlocks[SWBlock.value()];
++      BlockFast &swblock = physicalBlocks[SWBlock.value()];
+       uint32_t i = this->convertPageToOffsetInBlock(lpn);
+-      swblock.getPageInfo(i, logicalPageNumber, valid, erased);
+-      if (valid && logicalPageNumber == lpn) {
++      if (swblock.isValid(i) && physicalToLogicalBlockMapping[SWBlock.value()] == this->convertPageToBlock(lpn)) {
+         // found
+         pbn = SWBlock.value();
+         pageIdx = i;
+@@ -769,10 +752,9 @@ bool FastMapping::findValidPage(uint32_t lpn, uint32_t &pbn, uint32_t &pageIdx,
+     auto it = RWlogMapping.find(lpn);
+     if (it != RWlogMapping.end()) {
+       auto &pair = it->second;
+-      Block &rwblock = physicalBlocks[pair.first];
++      BlockFast &rwblock = physicalBlocks[pair.first];
+       uint32_t i = pair.second;
+-      rwblock.getPageInfo(i, logicalPageNumber, valid, erased);
+-      assert(valid && logicalPageNumber == lpn);
++      assert(rwblock.isValid(i) && rwblock.getLPN(i)== lpn);
+       pbn = pair.first;
+       pageIdx = i;
+       pBlock = &rwblock;
+diff --git a/ftl/fast_mapping.hh b/ftl/fast_mapping.hh
+index 5ce4587..9d2cd9c 100644
+--- a/ftl/fast_mapping.hh
++++ b/ftl/fast_mapping.hh
+@@ -27,7 +27,7 @@
+ #include <optional>
+ 
+ #include "ftl/abstract_ftl.hh"
+-#include "ftl/common/block.hh"
++#include "ftl/common/block_fast.hh"
+ #include "ftl/ftl.hh"
+ #include "pal/pal.hh"
+ 
+@@ -100,7 +100,7 @@ class FastMapping : public AbstractFTL {
+       physicalToLogicalBlockMapping;
+ 
+   // physical block number -> block info
+-  std::vector<Block> physicalBlocks; // in use
++  std::vector<BlockFast> physicalBlocks; // in use
+   std::deque<uint32_t> freeBlocks;
+ 
+   std::unordered_map<uint64_t, std::pair<uint32_t, uint32_t>>
+@@ -140,7 +140,7 @@ class FastMapping : public AbstractFTL {
+   // find the only one valid page
+   // if found return true, otherwise return false
+   bool findValidPage(uint32_t lpn, uint32_t &pbn, uint32_t &pageIdx, 
+-    Block *&pBlock, enum BlockType &blockType);
++    BlockFast *&pBlock, enum BlockType &blockType);
+ 
+   void eraseInternal(uint32_t physicalBlockNum, uint64_t &tick, bool sendToPAL);
+ 
+-- 
+2.34.1
+

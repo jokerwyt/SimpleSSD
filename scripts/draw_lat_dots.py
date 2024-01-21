@@ -46,7 +46,7 @@ def draw(filename, picpath):
 
 
     # make it bigger
-    plt.rcParams["figure.figsize"] = (15, 7)
+    plt.rcParams["figure.figsize"] = (10, 5)
 
     # create a new figure
     plt.figure()
@@ -66,13 +66,16 @@ def draw(filename, picpath):
     # put avg latency on the graph
     # draw a different color line
     avg = np.average(data)
-    plt.axhline(y=avg, color='g', linestyle='-')
+    # plt.axhline(y=avg, color='g', linestyle='-')
     # create a separate text box to display additional notes
     text_box = plt.text(0.90, 0.90, f'avg: {avg:.3f}ms\nmin: {np.min(data):.3f}ms\nmax: {np.max(data):.3f}ms',
                         transform=plt.gca().transAxes, fontsize=12, verticalalignment='top',
                         bbox=dict(facecolor='white', edgecolor='black', boxstyle='round,pad=0.5'))
     
     # adjmst plot margins to make room for the text box
+
+    # put the file name on the graph
+    plt.title(filename)
     plt.subplots_adjust(right=0.85)
 
     # # add text, only 3 digits after decimal point

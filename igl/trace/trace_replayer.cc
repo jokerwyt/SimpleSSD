@@ -349,6 +349,8 @@ void TraceReplayer::submitIO() {
   bio.offset = linedata.offset;
   bio.length = linedata.length;
 
+  io_submitted += bio.length;
+
   bioEntry.submitIO(bio);
 
   io_depth++;

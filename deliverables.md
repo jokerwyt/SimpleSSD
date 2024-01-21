@@ -67,14 +67,14 @@ PageSize = 4096
 BlockCnt = 8*4*4*1*512=65536
 
 - `blockMappingTable`: sizeof(uint32_t) * 2 * (65536) = 524288 B
-- `blocks`: 65536 * sizeof(Block) = 
-- `SWBlock`: The SW log block.
-- `RWBlocks`: All RW log blocks.
-- `RWlogMapping`: All lpn in RW log block -> (pbn, pageOffset)
+- `blocks`: 65536 * sizeof(Block) = 4194304 B
+- `RWlogMapping`: RW_cnt * pagesize * 8B = 24576B
+
+precentage: 4743168 B / 128G = 0.0037056%
 ```
 
 # 2. Git Patch
-TODO. 见附件
+见附件
 
 # 3. 与Page Mapping的性能比较
 
